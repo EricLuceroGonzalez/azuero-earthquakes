@@ -25,9 +25,28 @@ make sounds            # banco de sonidos -> sounds/*.mp3 (versionar: son tuyos)
 make preview           # prueba rápida -> out/preview.mp4
 make render            # video completo -> out/sismos_panama.mp4
 make render-vertical   # 1080x1920 para reels/shorts -> out/sismos_panama_vertical.mp4
+make azuero            # réplicas 2026 en Azuero–Soná -> out/sismos_azuero.mp4
+make azuero-vertical   # lo mismo en 1080x1920
 ```
 
 Para pasar opciones: `uv run python -m sismos_azuero render --help`.
+
+Opciones de `render` para recortar y cambiar el ritmo:
+
+| Opción | Qué hace |
+|---|---|
+| `--region panama\|azuero` | recorte del mapa; el catálogo siempre cubre todo Panamá |
+| `--from` / `--to` | filtra por fecha (hora de Panamá), por ejemplo `--from 2026-01-01` |
+| `--pacing time\|events` | `time`: proporcional al tiempo real · `events`: un sismo cada `--gap` s |
+| `--gap` | segundos entre sismos con `--pacing events` (por defecto 0.5) |
+| `--vertical` | formato 1080×1920 |
+
+### Datos históricos (antes de 1970)
+
+`make fetch START=1926-01-01` descarga también los sismos históricos. Antes de los años
+70 el catálogo del USGS solo tiene los sismos grandes (en su mayoría M≥5.5, del catálogo
+ISC-GEM), así que el video mostrará décadas casi vacías seguidas de la red moderna. Con
+`--pacing events` se nota menos ese salto.
 
 - **Tiempo:** la fecha real se mapea de forma lineal al video. Los primeros años se ven
   escasos porque la red sísmica tenía menos estaciones.

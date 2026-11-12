@@ -35,3 +35,14 @@ def test_area_grows_with_magnitude():
 def test_cli_requires_subcommand():
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_regions_inside_catalog_bbox():
+    from sismos_azuero.main import BBOX, REGIONS
+
+    for region in REGIONS.values():
+        b = region["bbox"]
+        assert BBOX["minlatitude"] <= b["minlatitude"] < b["maxlatitude"]
+        assert b["maxlatitude"] <= BBOX["maxlatitude"]
+        assert BBOX["minlongitude"] <= b["minlongitude"] < b["maxlongitude"]
+        assert b["maxlongitude"] <= BBOX["maxlongitude"]

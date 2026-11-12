@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup test lint format check diagrams clean fetch sounds render render-vertical preview preview-vertical video
+.PHONY: help setup test lint format check diagrams clean fetch sounds render render-vertical azuero azuero-vertical preview preview-vertical video
 
 # Variables de .env (por ejemplo ELEVENLABS_API_KEY) disponibles para los comandos.
 -include .env
@@ -31,8 +31,10 @@ diagrams:  ## Diagramas UML con pyreverse (requiere graphviz)
 	mkdir -p docs/diagrams
 	uv run pyreverse -o png -p sismos_azuero -d docs/diagrams src/sismos_azuero
 
-fetch:  ## Descarga el catálogo del USGS -> data/sismos.csv
-	$(RUN) fetch
+START ?= 1970-01-01
+
+fetch:  ## Catálogo USGS -> data/sismos.csv (desde otra fecha: make fetch START=1926-01-01)
+	$(RUN) fetch --start $(START)
 
 sounds:  ## Genera el banco de sonidos con ElevenLabs -> sounds/
 	@test -n "$$ELEVENLABS_API_KEY" || (echo "Falta ELEVENLABS_API_KEY (ponla en .env)" && exit 1)
@@ -43,6 +45,14 @@ render:  ## Video completo -> out/sismos_panama.mp4
 
 render-vertical:  ## Video vertical 1080x1920 -> out/sismos_panama_vertical.mp4
 	$(RUN) render --vertical
+
+AZUERO := --region azuero --from 2026-01-01 --pacing events --gap 0.5
+
+azuero:  ## Réplicas 2026 en Azuero-Soná, un sismo cada 0.5 s -> out/sismos_azuero.mp4
+	$(RUN) render $(AZUERO)
+
+azuero-vertical:  ## Lo mismo en 1080x1920 -> out/sismos_azuero_vertical.mp4
+	$(RUN) render --vertical $(AZUERO)
 
 preview:  ## Prueba rápida con los últimos 500 sismos -> out/preview.mp4
 	$(RUN) render --limit 500 --duration 8 --intro 1 --outro 1 --output preview.mp4

@@ -37,6 +37,19 @@ OUT_DIR = HERE / "out"
 # Recuadro de Panamá (incluye la zona de fractura de Panamá y el sur de Azuero).
 BBOX = dict(minlatitude=5.0, maxlatitude=10.5, minlongitude=-84.0, maxlongitude=-76.5)
 
+# Regiones para el render: recortan el catálogo (que siempre cubre todo Panamá).
+REGIONS = {
+    "panama": dict(title="Sismos en Panamá", bbox=BBOX),
+    "azuero": dict(
+        title="Sismos en Azuero–Soná",
+        bbox=dict(
+            minlatitude=6.6, maxlatitude=8.4, minlongitude=-82.0, maxlongitude=-79.5
+        ),
+    ),
+}
+TZ = "America/Panama"
+MESES = "ene feb mar abr may jun jul ago sep oct nov dic".split()
+
 USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 ELEVEN_URL = "https://api.elevenlabs.io/v1/sound-generation"
 
@@ -104,6 +117,12 @@ BUCKETS: list[Bucket] = [
     ),
 ]
 VARIATIONS = 3
+
+
+def matplotlib_rgb(hex_color: str) -> tuple[float, float, float]:
+    """'#rrggbb' -> (r, g, b) en 0..1, el formato que matplotlib acepta con alfa."""
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i : i + 2], 16) / 255 for i in (0, 2, 4))
 
 
 def bucket_for(mag: float) -> Bucket:
@@ -231,7 +250,27 @@ OCEAN = "#e5f5f9"
 LAND = "#2ca25f"
 COAST = "#99d8c9"
 
-# Lugares de referencia (coordenadas aproximadas).
+# Ajustes de legibilidad derivados de la paleta (no agregan colores nuevos):
+# - Los sismos profundos (#fbb4b9, #feebe2) casi no contrastan con OCEAN (1.5:1 y
+#   1.0:1) y los intermedios se pierden sobre LAND; un contorno fino de INK_PLACES
+#   los separa del fondo sin alterar el color que codifica la profundidad.
+# - En el panel oscuro pasa lo contrario con los superficiales (#7a0177 sobre
+#   PANEL_BG = 1.8:1), así que ahí el contorno es INK_MUTED.
+MARK_EDGE_MAP = (*matplotlib_rgb(INK_PLACES), 0.45)
+MARK_EDGE_PANEL = (*matplotlib_rgb(INK_MUTED), 0.35)
+# Opacidad de los sismos ya ocurridos. Con 0.45 el morado translúcido sobre LAND se
+# volvía gris y perdía la profundidad; 0.7 conserva el tono sin tapar el mapa.
+OLD_ALPHA = 0.7
+
+# Lugares de referencia (coordenadas aproximadas). Los de LOCAL_PLACES solo se
+# dibujan en regiones pequeñas, donde hay espacio.
+LOCAL_PLACES = [
+    ("Soná", 8.012, -81.318),
+    ("Chitré", 7.961, -80.430),
+    ("Las Tablas", 7.765, -80.274),
+    ("Pedasí", 7.528, -80.027),
+    ("Isla de Coiba", 7.450, -81.770),
+]
 PLACES = [
     ("Ciudad de Panamá", 8.983, -79.517),
     ("Colón", 9.359, -79.901),
@@ -262,10 +301,11 @@ CINTURON_SUR = [  # Nazca | bloque de Panamá (Cinturón Deformado del Sur de Pa
 ]
 PLATE_LINE = "#7d8ba0"
 PLATE_LABELS = [
-    # (nombre, lat, lon, alineación horizontal)
-    ("Placa de Cocos", 6.45, -83.93, "left"),
-    ("Placa de Nazca", 5.60, -80.60, "center"),
-    ("Placa del Caribe", 10.15, -80.70, "center"),
+    # (nombre, lat, lon, alineación horizontal, región donde se dibuja)
+    ("Placa de Cocos", 6.45, -83.93, "left", "panama"),
+    ("Placa de Nazca", 5.60, -80.60, "center", "panama"),
+    ("Placa de Nazca", 6.72, -81.40, "center", "azuero"),
+    ("Placa del Caribe", 10.15, -80.70, "center", "panama"),
 ]
 
 
@@ -350,34 +390,73 @@ def cmd_render(args) -> None:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker
     from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
     from pyproj import Transformer
 
+    region = REGIONS[args.region]
+    bbox = region["bbox"]
+
     df = pd.read_csv(DATA_DIR / "sismos.csv", parse_dates=["time"])
-    df = df[df["mag"] >= args.min_mag].reset_index(drop=True)
+    df["time"] = df["time"].dt.tz_convert(TZ)  # todo se muestra en hora de Panamá
+    keep = (
+        (df["mag"] >= args.min_mag)
+        & df["latitude"].between(bbox["minlatitude"], bbox["maxlatitude"])
+        & df["longitude"].between(bbox["minlongitude"], bbox["maxlongitude"])
+    )
+    if args.from_date:
+        keep &= df["time"] >= pd.Timestamp(args.from_date, tz=TZ)
+    if args.to_date:
+        keep &= df["time"] < pd.Timestamp(args.to_date, tz=TZ)
+    df = df[keep].reset_index(drop=True)
     if args.limit:
         df = df.tail(args.limit).reset_index(drop=True)
+    if df.empty:
+        sys.exit("No hay sismos con esos filtros.")
+    logger.info(f"{len(df)} sismos en la región '{args.region}'")
     OUT_DIR.mkdir(exist_ok=True)
 
     fps, dpi = args.fps, 100
     W, H = (1080, 1920) if args.vertical else (1920, 1080)
-    if args.vertical and args.output == DEFAULT_OUTPUT:
-        args.output = "sismos_panama_vertical.mp4"
-    intro, outro, body = args.intro, args.outro, args.duration
-    total = intro + body + outro
+    if args.output == DEFAULT_OUTPUT:
+        stem = "sismos_panama" if args.region == "panama" else f"sismos_{args.region}"
+        args.output = f"{stem}{'_vertical' if args.vertical else ''}.mp4"
+
+    if args.pacing == "events":
+        # Un sismo cada `gap` segundos: más espacio para oír cada uno, aunque se
+        # pierde la proporción del tiempo real (el contador de fecha la recupera).
+        body = len(df) * args.gap
+        event_t = args.intro + np.arange(len(df)) * args.gap
+    else:
+        # Tiempo real -> tiempo de video, lineal (refleja también que la red
+        # sísmica mejoró con los años).
+        body = args.duration
+        elapsed = (df["time"] - df["time"].min()).dt.total_seconds().to_numpy()
+        event_t = args.intro + elapsed / max(float(elapsed.max()), 1.0) * body
+    total = args.intro + body + args.outro
     n_frames = int(round(total * fps))
 
-    # Tiempo real -> tiempo de video, lineal (refleja también que la red sísmica
-    # mejoró con los años).
-    elapsed = (df["time"] - df["time"].min()).dt.total_seconds().to_numpy()
-    frac = elapsed / max(float(elapsed.max()), 1.0)
-    event_t = intro + frac * body
+    # Precisión de la fecha según el lapso que cubre el video.
+    span_days = (df["time"].max() - df["time"].min()).days
+    show_hours = span_days < 60 or args.pacing == "events"
+    if show_hours:
+        date_fmt = "%Y-%m-%d %H:%M"
+    elif span_days < 730:
+        date_fmt = "%Y-%m-%d"
+    else:
+        date_fmt = "%Y-%m"
 
     # Proyección a Web Mercator para casar con los mosaicos del mapa base.
     tr = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
     x, y = tr.transform(df["longitude"].to_numpy(), df["latitude"].to_numpy())
-    x0, y0 = tr.transform(BBOX["minlongitude"], BBOX["minlatitude"])
-    x1, y1 = tr.transform(BBOX["maxlongitude"], BBOX["maxlatitude"])
+    x0, y0 = tr.transform(bbox["minlongitude"], bbox["minlatitude"])
+    x1, y1 = tr.transform(bbox["maxlongitude"], bbox["maxlatitude"])
+
+    def inside(lat_, lon_):
+        return (
+            bbox["minlatitude"] <= lat_ <= bbox["maxlatitude"]
+            and bbox["minlongitude"] <= lon_ <= bbox["maxlongitude"]
+        )
 
     # Tamaño del mapa en píxeles, respetando la proporción del recuadro.
     aspect = (x1 - x0) / (y1 - y0)
@@ -392,6 +471,15 @@ def cmd_render(args) -> None:
     mx, my = np.meshgrid(gx, gy)
     lon, lat = tr.transform(mx, my, direction="INVERSE")
     land = globe.is_land(lat, lon).astype(float)
+    # La máscara es de ~1 km: en regiones pequeñas cada celda ocupa varios píxeles y
+    # la costa se ve escalonada. Un desenfoque suave antes de umbralizar la redondea.
+    km_per_px = (x1 - x0) / map_w / 1000
+    if km_per_px < 0.6:
+        k = max(3, int(round(1.2 / km_per_px)) | 1)
+        kernel = np.ones(k) / k
+        for axis in (0, 1):
+            land = np.apply_along_axis(np.convolve, axis, land, kernel, mode="same")
+        land = (land >= 0.5).astype(float)
 
     fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi, facecolor=PANEL_BG)
     if args.vertical:  # mapa arriba, a todo el ancho
@@ -414,10 +502,12 @@ def cmd_render(args) -> None:
     ax.set_ylim(y0, y1)
     ax.set_axis_off()
 
-    # Referencias geográficas.
-    px, py = tr.transform([p[2] for p in PLACES], [p[1] for p in PLACES])
-    ax.scatter(px, py, s=10, c=INK_MUTED, zorder=3, linewidths=0)
-    for (name, _, _), xx, yy in zip(PLACES, px, py, strict=True):
+    # Referencias geográficas (solo las que caen dentro del recuadro).
+    places = PLACES + (LOCAL_PLACES if args.region != "panama" else [])
+    places = [p for p in places if inside(p[1], p[2])]
+    px, py = tr.transform([p[2] for p in places], [p[1] for p in places])
+    ax.scatter(px, py, s=10, c=INK_PLACES, zorder=3, linewidths=0)
+    for (name, _, _), xx, yy in zip(places, px, py, strict=True):
         ax.annotate(
             name,
             (xx, yy),
@@ -436,7 +526,7 @@ def cmd_render(args) -> None:
     # Las líneas y etiquetas van encima de los sismos, con un halo oscuro para que
     # se lean aunque haya un enjambre debajo.
     halo = [patheffects.withStroke(linewidth=4.5, foreground=OCEAN, alpha=0.7)]
-    label_box = dict(boxstyle="round,pad=0.25", fc=OCEAN, ec="none", alpha=0.75)
+    label_box = dict(boxstyle="round,pad=0.25", fc=OCEAN, ec="none", alpha=0.9)
 
     # Límites de placa (debajo de los sismos) y nombres de las placas.
     for line in (FRACTURA_PANAMA, FOSA_MESOAMERICANA, CINTURON_SUR):
@@ -448,7 +538,9 @@ def cmd_render(args) -> None:
             solid_capstyle="round",
             path_effects=halo,
         )
-    for name, lat_, lon_, ha in PLATE_LABELS:
+    for name, lat_, lon_, ha, where in PLATE_LABELS:
+        if where != args.region:
+            continue
         ax.text(
             *tr.transform(lon_, lat_),
             name.upper(),
@@ -459,12 +551,15 @@ def cmd_render(args) -> None:
             va="center",
             zorder=2,
         )
-    # Nombres de los límites: (texto, lat, lon, rotación, alineación).
-    for text, lat_, lon_, rot, ha in (
-        ("Zona de Fractura de Panamá", 5.25, -82.85, 90, "left"),
-        ("Cinturón Deformado del Sur", 6.78, -79.40, 3, "left"),
-        ("Fosa Mesoamericana", 7.72, -83.55, -33, "center"),
+    # Nombres de los límites: (texto, lat, lon, rotación, alineación, región).
+    for text, lat_, lon_, rot, ha, where in (
+        ("Zona de Fractura de Panamá", 5.25, -82.85, 90, "left", "panama"),
+        ("Cinturón Deformado del Sur", 6.78, -79.40, 3, "left", "panama"),
+        ("Cinturón Deformado del Sur", 6.95, -80.45, 3, "left", "azuero"),
+        ("Fosa Mesoamericana", 7.72, -83.55, -33, "center", "panama"),
     ):
+        if where != args.region:
+            continue
         ax.text(
             *tr.transform(lon_, lat_),
             text,
@@ -481,17 +576,22 @@ def cmd_render(args) -> None:
 
     # Fallas.
     ax.plot(
-        *proj(AZUERO_SONA), color=INK, lw=2, ls=(0, (4, 2)), zorder=6, path_effects=halo
+        *proj(AZUERO_SONA),
+        color=PLATE_LINE,
+        lw=2,
+        ls=(0, (4, 2)),
+        zorder=6,
+        path_effects=halo,
     )
     ax_x, ax_y = proj(AZUERO_SONA)
     ax.annotate(
         "Zona de falla Azuero–Soná",
         (ax_x[1], ax_y[1]),
-        xytext=(-30, -60),
+        xytext=(-30, -60) if args.region == "panama" else (10, -110),
         textcoords="offset points",
         color=PLATE_LINE,
         fontsize=12,
-        ha="right",
+        ha="right" if args.region == "panama" else "left",
         zorder=7,
         bbox=label_box,
         arrowprops=dict(arrowstyle="-", color=PLATE_LINE, lw=0.8, shrinkA=2, shrinkB=2),
@@ -524,7 +624,7 @@ def cmd_render(args) -> None:
         edgecolor="none",
         framealpha=0.8,
         fontsize=11,
-        labelcolor=INK_MUTED,
+        labelcolor=INK_PLACES,
         handlelength=2.6,
     )
     leg.set_zorder(8)
@@ -532,10 +632,18 @@ def cmd_render(args) -> None:
     cmap = LinearSegmentedColormap.from_list("depth", DEPTH_RAMP)
     norm = Normalize(0, DEPTH_MAX_KM)
     base_rgba = cmap(norm(np.clip(df["depth"].to_numpy(), 0, DEPTH_MAX_KM)))
-    areas = mag_to_area(df["mag"].to_numpy())
+    # En regiones pequeñas los círculos crecen un poco para no perderse en el zoom.
+    zoom = (BBOX["maxlongitude"] - BBOX["minlongitude"]) / (
+        bbox["maxlongitude"] - bbox["minlongitude"]
+    )
+    size_scale = zoom**0.7
+    areas = mag_to_area(df["mag"].to_numpy(), size_scale)
 
     # Dos capas: puntos ya ocurridos (persisten, atenuados) y el "destello" reciente.
-    old = ax.scatter([], [], s=[], zorder=4, linewidths=0)
+    old = ax.scatter([], [], s=[], zorder=4, linewidths=0.5, edgecolors=[MARK_EDGE_MAP])
+    # El anillo lleva debajo una copia más gruesa en INK_PLACES, que se desvanece con
+    # él: así se ve también cuando el color de profundidad es claro.
+    flash_bg = ax.scatter([], [], s=[], zorder=5, facecolors="none", linewidths=3.5)
     flash = ax.scatter([], [], s=[], zorder=5, facecolors="none", linewidths=2)
 
     # ---- panel de información ----
@@ -576,14 +684,37 @@ def cmd_render(args) -> None:
         xx, yy, size = L[key]
         return fig.text(xx, yy, text, fontsize=size, **kw)
 
-    put("title", "Sismos en Panamá", color=INK, weight="bold")
-    put(
+    title = put("title", region["title"], color=INK, weight="bold")
+
+    def fit(txt, sample=None, min_size=12):
+        """Achica un texto hasta que quepa entre su x y el borde derecho del panel."""
+        max_w = (right - txt.get_position()[0]) * W
+        final = txt.get_text()
+        if sample is not None:
+            txt.set_text(sample)
+        renderer = fig.canvas.get_renderer()
+        while (
+            txt.get_window_extent(renderer).width > max_w
+            and txt.get_fontsize() > min_size
+        ):
+            txt.set_fontsize(txt.get_fontsize() - 1)
+        txt.set_text(final)
+
+    fit(title)
+    subtitle = put(
         "subtitle",
         f"Catálogo USGS · M ≥ {args.min_mag} · "
-        f"{df['time'].min().year}–{df['time'].max().year}",
+        + (
+            f"{df['time'].min().year}"
+            if df["time"].min().year == df["time"].max().year
+            else f"{df['time'].min().year}–{df['time'].max().year}"
+        )
+        + (" · hora de Panamá" if show_hours else ""),
         color=INK_MUTED,
     )
+    fit(subtitle, min_size=9)
     date_txt = put("date", color=INK, weight="bold", family="monospace")
+    fit(date_txt, sample=df["time"].max().strftime(date_fmt))
     count_txt = put("count", color=INK_MUTED)
     max_txt = put("max", color=INK_MUTED)
 
@@ -597,7 +728,7 @@ def cmd_render(args) -> None:
         lax.scatter(
             [k * 1.1 + 0.2],
             [0.15],
-            s=mag_to_area(np.array([m]))[0],
+            s=mag_to_area(np.array([m]), size_scale)[0],
             c="none",
             edgecolors=INK,
             linewidths=1.2,
@@ -615,7 +746,9 @@ def cmd_render(args) -> None:
     cb = fig.colorbar(
         plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal"
     )
-    cb.outline.set_visible(False)
+    # El extremo superficial (#7a0177) se funde con PANEL_BG: un borde fino lo delimita.
+    cb.outline.set_edgecolor(MARK_EDGE_PANEL)
+    cb.outline.set_linewidth(0.8)
     cb.set_ticks([0, 50, 100, 150])
     cb.set_ticklabels(["0", "50", "100", "150+"])
     cax.tick_params(colors=INK_MUTED, labelsize=12, length=0)
@@ -623,7 +756,9 @@ def cmd_render(args) -> None:
     # Línea de tiempo: magnitud vs fecha, se va revelando.
     tax = fig.add_axes(L["timeline"], facecolor=PANEL_BG)
     tax.scatter(df["time"], df["mag"], s=4, c=INK_MUTED, alpha=0.18, linewidths=0)
-    tl = tax.scatter([], [], s=6, linewidths=0, zorder=3)
+    tl = tax.scatter(
+        [], [], s=7, linewidths=0.4, edgecolors=[MARK_EDGE_PANEL], zorder=3
+    )
     cursor = tax.axvline(df["time"].min(), color=INK, lw=1)
     tax.set_ylim(args.min_mag - 0.2, max(7.6, df["mag"].max() + 0.3))
     tax.set_xlim(df["time"].min(), df["time"].max())
@@ -634,7 +769,17 @@ def cmd_render(args) -> None:
     tax.tick_params(colors=INK_MUTED, labelsize=11)
     loc = matplotlib.dates.AutoDateLocator(minticks=3, maxticks=5)
     tax.xaxis.set_major_locator(loc)
-    tax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%Y"))
+    if span_days < 730:  # fechas en español: "9 oct"
+
+        def fmt_fecha(v, _pos):
+            d = matplotlib.dates.num2date(v, tz=TZ)
+            return f"{d.day} {MESES[d.month - 1]}"
+
+        tax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(fmt_fecha))
+    else:
+        step = max(1, int(span_days / 365.25 / 5))
+        tax.xaxis.set_major_locator(matplotlib.dates.YearLocator(step))
+        tax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%Y"))
     tax.set_ylabel("Magnitud", color=INK_MUTED, fontsize=12)
     tax.grid(axis="y", color="#2a2a28", lw=0.8)
 
@@ -651,7 +796,9 @@ def cmd_render(args) -> None:
     mags = df["mag"].to_numpy()
     fade_s = args.flash
 
-    video_tmp = OUT_DIR / "_video.mp4"
+    # Temporales con el nombre de la salida: permite varios renders a la vez.
+    stem = Path(args.output).stem
+    video_tmp = OUT_DIR / f"_{stem}_video.mp4"
     ff = subprocess.Popen(
         [
             "ffmpeg",
@@ -690,7 +837,7 @@ def cmd_render(args) -> None:
         if n:
             age = t - event_t[visible]
             rgba = base_rgba[visible].copy()
-            rgba[:, 3] = np.where(age < fade_s, 0.95, 0.45)
+            rgba[:, 3] = np.where(age < fade_s, 0.95, OLD_ALPHA)
             old.set_offsets(np.column_stack([x[visible], y[visible]]))
             old.set_sizes(areas[visible])
             old.set_facecolors(rgba)
@@ -700,14 +847,20 @@ def cmd_render(args) -> None:
                 a = (t - event_t[recent]) / fade_s  # 0 -> 1
                 ring = base_rgba[recent].copy()
                 ring[:, 3] = 1 - a
-                flash.set_offsets(np.column_stack([x[recent], y[recent]]))
-                flash.set_sizes(areas[recent] * (1 + 5 * a) ** 2)
-                flash.set_edgecolors(ring)
+                pts = np.column_stack([x[recent], y[recent]])
+                sizes = areas[recent] * (1 + 5 * a) ** 2
+                under = np.tile([*matplotlib_rgb(INK_PLACES), 0.0], (len(a), 1))
+                under[:, 3] = 0.5 * (1 - a)
+                for layer, colors in ((flash_bg, under), (flash, ring)):
+                    layer.set_offsets(pts)
+                    layer.set_sizes(sizes)
+                    layer.set_edgecolors(colors)
             else:
                 flash.set_offsets(np.empty((0, 2)))
+                flash_bg.set_offsets(np.empty((0, 2)))
 
             current = times[visible].iloc[-1]
-            date_txt.set_text(current.strftime("%Y-%m"))
+            date_txt.set_text(current.strftime(date_fmt))
             count_txt.set_text(f"{n:,} sismos".replace(",", "."))
             imax = int(np.argmax(np.where(visible, mags, -1)))
             max_txt.set_text(
@@ -722,7 +875,7 @@ def cmd_render(args) -> None:
             tl.set_facecolors(base_rgba[visible])
             cursor.set_xdata([current, current])
         else:
-            date_txt.set_text(f"{times.iloc[0]:%Y-%m}")
+            date_txt.set_text(times.iloc[0].strftime(date_fmt))
             count_txt.set_text("0 sismos")
 
         fig.canvas.draw()
@@ -736,7 +889,7 @@ def cmd_render(args) -> None:
 
     logger.info("Mezclando audio ...")
     audio = build_audio(df, event_t, total, args)
-    wav = OUT_DIR / "_audio.wav"
+    wav = OUT_DIR / f"_{stem}_audio.wav"
     write_wav(wav, audio)
 
     out = OUT_DIR / args.output
@@ -762,6 +915,7 @@ def cmd_render(args) -> None:
         check=True,
     )
     video_tmp.unlink()
+    wav.unlink()
     logger.info(f"Listo: {out.relative_to(HERE)}")
 
 
@@ -812,6 +966,30 @@ def main(argv: list[str] | None = None) -> None:
             "--limit", type=int, default=0, help="solo los últimos N sismos (pruebas)"
         )
         sp.add_argument("--output", default=DEFAULT_OUTPUT)
+        sp.add_argument(
+            "--region",
+            choices=sorted(REGIONS),
+            default="panama",
+            help="recorte del mapa (el catálogo siempre cubre todo Panamá)",
+        )
+        sp.add_argument(
+            "--from", dest="from_date", default=None, help="solo desde esta fecha"
+        )
+        sp.add_argument(
+            "--to", dest="to_date", default=None, help="solo hasta esta fecha (excl.)"
+        )
+        sp.add_argument(
+            "--pacing",
+            choices=["time", "events"],
+            default="time",
+            help="time: proporcional al tiempo real · events: un sismo cada --gap s",
+        )
+        sp.add_argument(
+            "--gap",
+            type=float,
+            default=0.5,
+            help="segundos entre sismos con --pacing events",
+        )
         sp.add_argument(
             "--vertical",
             action="store_true",
