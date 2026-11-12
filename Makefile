@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup test lint format check diagrams clean fetch sounds render preview video
+.PHONY: help setup test lint format check diagrams clean fetch sounds render render-vertical preview preview-vertical video
 
 # Variables de .env (por ejemplo ELEVENLABS_API_KEY) disponibles para los comandos.
 -include .env
@@ -41,8 +41,14 @@ sounds:  ## Genera el banco de sonidos con ElevenLabs -> sounds/
 render:  ## Video completo -> out/sismos_panama.mp4
 	$(RUN) render
 
+render-vertical:  ## Video vertical 1080x1920 -> out/sismos_panama_vertical.mp4
+	$(RUN) render --vertical
+
 preview:  ## Prueba rápida con los últimos 500 sismos -> out/preview.mp4
 	$(RUN) render --limit 500 --duration 8 --intro 1 --outro 1 --output preview.mp4
+
+preview-vertical:  ## Prueba rápida en vertical -> out/preview_vertical.mp4
+	$(RUN) render --vertical --limit 500 --duration 8 --intro 1 --outro 1 --output preview_vertical.mp4
 
 video: fetch sounds render  ## fetch + sounds + render
 

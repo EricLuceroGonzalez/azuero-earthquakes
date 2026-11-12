@@ -41,6 +41,7 @@ USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 ELEVEN_URL = "https://api.elevenlabs.io/v1/sound-generation"
 
 SAMPLE_RATE = 44100
+DEFAULT_OUTPUT = "sismos_panama.mp4"
 
 logger = logging.getLogger(__name__)
 
@@ -219,15 +220,16 @@ def load_audio(path: Path) -> np.ndarray:
 
 # Rampa secuencial de un solo tono (naranja) para la profundidad:
 # superficiales = claros y brillantes (los que más se sienten), profundos = oscuros.
-DEPTH_RAMP = ["#ffd9c2", "#f6a77c", "#eb6834", "#c24a1c", "#8a3212"]
+DEPTH_RAMP = ["#7a0177", "#c51b8a", "#f768a1", "#fbb4b9", "#feebe2"]
 DEPTH_MAX_KM = 150
 
-INK = "#f2f1ee"
-INK_MUTED = "#a3a29d"
+INK = "#ffffff"
+INK_MUTED = "#f3f3f3"
+INK_PLACES = "#161616"
 PANEL_BG = "#161616"
-OCEAN = "#101112"
-LAND = "#232321"
-COAST = "#3d3d39"
+OCEAN = "#e5f5f9"
+LAND = "#2ca25f"
+COAST = "#99d8c9"
 
 # Lugares de referencia (coordenadas aproximadas).
 PLACES = [
@@ -237,8 +239,34 @@ PLACES = [
     ("Santiago", 8.100, -80.983),
     ("Tonosí", 7.403, -80.441),
 ]
-# Traza aproximada de la falla de Pedro Miguel (Gamboa -> esclusas de Pedro Miguel).
+# Trazas APROXIMADAS (lat, lon), simplificadas para ilustrar; no son cartografía.
+# Falla de Pedro Miguel: de Gamboa a las esclusas de Pedro Miguel.
 PEDRO_MIGUEL = [(9.130, -79.705), (9.060, -79.660), (9.010, -79.620)]
+# Zona de falla Azuero-Soná: cruza las penínsulas de Soná y Azuero hacia Tonosí.
+AZUERO_SONA = [
+    (7.85, -81.55),
+    (7.68, -81.15),
+    (7.55, -80.75),
+    (7.42, -80.35),
+    (7.35, -80.10),
+]
+# Límites de placa.
+FRACTURA_PANAMA = [(5.0, -82.55), (6.5, -82.60), (7.4, -82.75)]  # Cocos | Nazca
+FOSA_MESOAMERICANA = [(7.4, -82.75), (8.0, -83.60), (8.25, -84.0)]  # Cocos | Panamá
+CINTURON_SUR = [  # Nazca | bloque de Panamá (Cinturón Deformado del Sur de Panamá)
+    (7.10, -82.55),
+    (6.95, -81.50),
+    (6.85, -80.50),
+    (6.90, -79.50),
+    (7.05, -78.30),
+]
+PLATE_LINE = "#7d8ba0"
+PLATE_LABELS = [
+    # (nombre, lat, lon, alineación horizontal)
+    ("Placa de Cocos", 6.45, -83.93, "left"),
+    ("Placa de Nazca", 5.60, -80.60, "center"),
+    ("Placa del Caribe", 10.15, -80.70, "center"),
+]
 
 
 def mag_to_area(mag: np.ndarray, scale: float = 1.0) -> np.ndarray:
@@ -331,7 +359,10 @@ def cmd_render(args) -> None:
         df = df.tail(args.limit).reset_index(drop=True)
     OUT_DIR.mkdir(exist_ok=True)
 
-    fps, W, H, dpi = args.fps, 1920, 1080, 100
+    fps, dpi = args.fps, 100
+    W, H = (1080, 1920) if args.vertical else (1920, 1080)
+    if args.vertical and args.output == DEFAULT_OUTPUT:
+        args.output = "sismos_panama_vertical.mp4"
     intro, outro, body = args.intro, args.outro, args.duration
     total = intro + body + outro
     n_frames = int(round(total * fps))
@@ -348,16 +379,26 @@ def cmd_render(args) -> None:
     x0, y0 = tr.transform(BBOX["minlongitude"], BBOX["minlatitude"])
     x1, y1 = tr.transform(BBOX["maxlongitude"], BBOX["maxlatitude"])
 
+    # Tamaño del mapa en píxeles, respetando la proporción del recuadro.
+    aspect = (x1 - x0) / (y1 - y0)
+    if args.vertical:
+        map_w, map_h = W, int(round(W / aspect))
+    else:
+        map_w, map_h = int(round(H * aspect)), H
+
     # Mapa base sin conexión: máscara tierra/mar (~1 km) muestreada en Web Mercator.
-    map_w = int(round(H * (x1 - x0) / (y1 - y0)))
     gx = np.linspace(x0, x1, map_w)
-    gy = np.linspace(y0, y1, H)
+    gy = np.linspace(y0, y1, map_h)
     mx, my = np.meshgrid(gx, gy)
     lon, lat = tr.transform(mx, my, direction="INVERSE")
     land = globe.is_land(lat, lon).astype(float)
 
     fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi, facecolor=PANEL_BG)
-    ax = fig.add_axes([0, 0, map_w / W, 1])  # mapa a la izquierda, a escala
+    if args.vertical:  # mapa arriba, a todo el ancho
+        map_top = 0.875
+        ax = fig.add_axes([0, map_top - map_h / H, 1, map_h / H])
+    else:  # mapa a la izquierda, a toda la altura
+        ax = fig.add_axes([0, 0, map_w / W, 1])
     ax.set_facecolor(OCEAN)
     ax.imshow(
         land,
@@ -382,23 +423,111 @@ def cmd_render(args) -> None:
             (xx, yy),
             xytext=(6, 4),
             textcoords="offset points",
-            color=INK_MUTED,
+            color=INK_PLACES,
             fontsize=11,
             zorder=3,
         )
-    fx, fy = tr.transform([p[1] for p in PEDRO_MIGUEL], [p[0] for p in PEDRO_MIGUEL])
-    ax.plot(fx, fy, color=INK, lw=2, ls=(0, (4, 2)), zorder=3, solid_capstyle="round")
+
+    from matplotlib import patheffects
+
+    def proj(line):
+        return tr.transform([p[1] for p in line], [p[0] for p in line])
+
+    # Las líneas y etiquetas van encima de los sismos, con un halo oscuro para que
+    # se lean aunque haya un enjambre debajo.
+    halo = [patheffects.withStroke(linewidth=4.5, foreground=OCEAN, alpha=0.7)]
+    label_box = dict(boxstyle="round,pad=0.25", fc=OCEAN, ec="none", alpha=0.75)
+
+    # Límites de placa (debajo de los sismos) y nombres de las placas.
+    for line in (FRACTURA_PANAMA, FOSA_MESOAMERICANA, CINTURON_SUR):
+        ax.plot(
+            *proj(line),
+            color=PLATE_LINE,
+            lw=1.8,
+            zorder=6,
+            solid_capstyle="round",
+            path_effects=halo,
+        )
+    for name, lat_, lon_, ha in PLATE_LABELS:
+        ax.text(
+            *tr.transform(lon_, lat_),
+            name.upper(),
+            color=PLATE_LINE,
+            fontsize=13,
+            weight="bold",
+            ha=ha,
+            va="center",
+            zorder=2,
+        )
+    # Nombres de los límites: (texto, lat, lon, rotación, alineación).
+    for text, lat_, lon_, rot, ha in (
+        ("Zona de Fractura de Panamá", 5.25, -82.85, 90, "left"),
+        ("Cinturón Deformado del Sur", 6.78, -79.40, 3, "left"),
+        ("Fosa Mesoamericana", 7.72, -83.55, -33, "center"),
+    ):
+        ax.text(
+            *tr.transform(lon_, lat_),
+            text,
+            rotation=rot,
+            rotation_mode="anchor",
+            ha=ha,
+            va="center",
+            color=PLATE_LINE,
+            fontsize=10,
+            style="italic",
+            zorder=7,
+            bbox=label_box,
+        )
+
+    # Fallas.
+    ax.plot(
+        *proj(AZUERO_SONA), color=INK, lw=2, ls=(0, (4, 2)), zorder=6, path_effects=halo
+    )
+    ax_x, ax_y = proj(AZUERO_SONA)
+    ax.annotate(
+        "Zona de falla Azuero–Soná",
+        (ax_x[1], ax_y[1]),
+        xytext=(-30, -60),
+        textcoords="offset points",
+        color=PLATE_LINE,
+        fontsize=12,
+        ha="right",
+        zorder=7,
+        bbox=label_box,
+        arrowprops=dict(arrowstyle="-", color=PLATE_LINE, lw=0.8, shrinkA=2, shrinkB=2),
+    )
+    fx, fy = proj(PEDRO_MIGUEL)
+    ax.plot(fx, fy, color=PLATE_LINE, lw=2, ls=(0, (4, 2)), zorder=6, path_effects=halo)
     ax.annotate(
         "Falla de Pedro Miguel",
         (fx[-1], fy[-1]),
         xytext=(-40, -38),
         textcoords="offset points",
-        color=INK,
+        color=PLATE_LINE,
         fontsize=12,
         ha="right",
-        zorder=3,
-        arrowprops=dict(arrowstyle="-", color=INK, lw=0.8, shrinkA=2, shrinkB=2),
+        zorder=7,
+        bbox=label_box,
+        arrowprops=dict(arrowstyle="-", color=PLATE_LINE, lw=0.8, shrinkA=2, shrinkB=2),
     )
+
+    from matplotlib.lines import Line2D
+
+    leg = ax.legend(
+        handles=[
+            Line2D([], [], color=PLATE_LINE, lw=1.8, label="Límite de placas"),
+            Line2D([], [], color=PLATE_LINE, lw=2, ls=(0, (4, 2)), label="Falla"),
+        ],
+        loc="upper right",
+        frameon=True,
+        facecolor=OCEAN,
+        edgecolor="none",
+        framealpha=0.8,
+        fontsize=11,
+        labelcolor=INK_MUTED,
+        handlelength=2.6,
+    )
+    leg.set_zorder(8)
 
     cmap = LinearSegmentedColormap.from_list("depth", DEPTH_RAMP)
     norm = Normalize(0, DEPTH_MAX_KM)
@@ -409,28 +538,58 @@ def cmd_render(args) -> None:
     old = ax.scatter([], [], s=[], zorder=4, linewidths=0)
     flash = ax.scatter([], [], s=[], zorder=5, facecolors="none", linewidths=2)
 
-    # ---- panel derecho ----
-    left = ax.get_position().x1 + 0.025
-    right = 0.975
-    pw = right - left
-    fig.text(left, 0.90, "Sismos en Panamá", color=INK, fontsize=30, weight="bold")
-    fig.text(
-        left,
-        0.855,
+    # ---- panel de información ----
+    # Posiciones (fracciones de la figura) para cada orientación.
+    if args.vertical:
+        left, right = 0.06, 0.94
+        L = dict(
+            title=(left, 0.945, 40),
+            subtitle=(left, 0.918, 17),
+            date=(left, 0.392, 52),
+            count=(left, 0.366, 20),
+            max=(left, 0.322, 17),
+            mag_label=(left, 0.285),
+            mag_axes=[left, 0.205, 0.42, 0.07],
+            depth_label=(0.56, 0.285),
+            depth_axes=[0.56, 0.255, right - 0.56, 0.012],
+            timeline=[left + 0.07, 0.06, right - left - 0.07, 0.115],
+            footer=(left, 0.012),
+        )
+    else:
+        left, right = ax.get_position().x1 + 0.025, 0.975
+        pw = right - left
+        L = dict(
+            title=(left, 0.90, 30),
+            subtitle=(left, 0.855, 14),
+            date=(left, 0.74, 40),
+            count=(left, 0.69, 17),
+            max=(left, 0.64, 15),
+            mag_label=(left, 0.555),
+            mag_axes=[left, 0.43, pw, 0.11],
+            depth_label=(left, 0.395),
+            depth_axes=[left, 0.36, pw * 0.92, 0.018],
+            timeline=[left + 0.03, 0.1, pw - 0.035, 0.19],
+            footer=(left, 0.03),
+        )
+
+    def put(key, text="", **kw):
+        xx, yy, size = L[key]
+        return fig.text(xx, yy, text, fontsize=size, **kw)
+
+    put("title", "Sismos en Panamá", color=INK, weight="bold")
+    put(
+        "subtitle",
         f"Catálogo USGS · M ≥ {args.min_mag} · "
         f"{df['time'].min().year}–{df['time'].max().year}",
         color=INK_MUTED,
-        fontsize=14,
     )
-    date_txt = fig.text(
-        left, 0.74, "", color=INK, fontsize=40, weight="bold", family="monospace"
-    )
-    count_txt = fig.text(left, 0.69, "", color=INK_MUTED, fontsize=17)
-    max_txt = fig.text(left, 0.64, "", color=INK_MUTED, fontsize=15, wrap=True)
+    date_txt = put("date", color=INK, weight="bold", family="monospace")
+    count_txt = put("count", color=INK_MUTED)
+    max_txt = put("max", color=INK_MUTED)
 
     # Leyenda de tamaño (magnitud).
-    fig.text(left, 0.555, "Magnitud", color=INK, fontsize=15, weight="bold")
-    lax = fig.add_axes([left, 0.43, pw, 0.11], facecolor=PANEL_BG)
+    fig.text(*L["mag_label"], "Magnitud", color=INK, fontsize=15, weight="bold")
+    lax = fig.add_axes(L["mag_axes"], facecolor=PANEL_BG)
     lax.set_axis_off()
     lax.set_xlim(-0.3, 5.0)
     lax.set_ylim(-1, 1)
@@ -449,8 +608,10 @@ def cmd_render(args) -> None:
         )
 
     # Barra de color (profundidad).
-    fig.text(left, 0.395, "Profundidad (km)", color=INK, fontsize=15, weight="bold")
-    cax = fig.add_axes([left, 0.36, pw * 0.92, 0.018])
+    fig.text(
+        *L["depth_label"], "Profundidad (km)", color=INK, fontsize=15, weight="bold"
+    )
+    cax = fig.add_axes(L["depth_axes"])
     cb = fig.colorbar(
         plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal"
     )
@@ -460,7 +621,7 @@ def cmd_render(args) -> None:
     cax.tick_params(colors=INK_MUTED, labelsize=12, length=0)
 
     # Línea de tiempo: magnitud vs fecha, se va revelando.
-    tax = fig.add_axes([left + 0.03, 0.1, pw - 0.035, 0.19], facecolor=PANEL_BG)
+    tax = fig.add_axes(L["timeline"], facecolor=PANEL_BG)
     tax.scatter(df["time"], df["mag"], s=4, c=INK_MUTED, alpha=0.18, linewidths=0)
     tl = tax.scatter([], [], s=6, linewidths=0, zorder=3)
     cursor = tax.axvline(df["time"].min(), color=INK, lw=1)
@@ -478,10 +639,9 @@ def cmd_render(args) -> None:
     tax.grid(axis="y", color="#2a2a28", lw=0.8)
 
     fig.text(
-        left,
-        0.03,
-        "Datos: USGS ComCat · Costas: global-land-mask (GLOBE)\n"
-        "Sonido: ElevenLabs · Traza de la falla aproximada",
+        *L["footer"],
+        "Datos: USGS ComCat · Costas: GLOBE (global-land-mask)\n"
+        "Sonido: ElevenLabs · Fallas y placas: trazas aproximadas",
         color="#6e6d69",
         fontsize=10,
         linespacing=1.5,
@@ -651,7 +811,12 @@ def main(argv: list[str] | None = None) -> None:
         sp.add_argument(
             "--limit", type=int, default=0, help="solo los últimos N sismos (pruebas)"
         )
-        sp.add_argument("--output", default="sismos_panama.mp4")
+        sp.add_argument("--output", default=DEFAULT_OUTPUT)
+        sp.add_argument(
+            "--vertical",
+            action="store_true",
+            help="formato vertical 1080x1920 (reels, shorts, stories)",
+        )
 
     add_fetch(sub.add_parser("fetch", help="descarga datos del USGS"))
     add_sounds(sub.add_parser("sounds", help="genera el banco de sonidos"))

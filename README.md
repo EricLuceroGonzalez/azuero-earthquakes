@@ -24,6 +24,7 @@ make fetch             # catálogo USGS -> data/sismos.csv
 make sounds            # banco de sonidos -> sounds/*.mp3 (versionar: son tuyos)
 make preview           # prueba rápida -> out/preview.mp4
 make render            # video completo -> out/sismos_panama.mp4
+make render-vertical   # 1080x1920 para reels/shorts -> out/sismos_panama_vertical.mp4
 ```
 
 Para pasar opciones: `uv run python -m sismos_azuero render --help`.
@@ -34,9 +35,12 @@ Para pasar opciones: `uv run python -m sismos_azuero render --help`.
 - **Color:** la profundidad, en una rampa de un solo tono (claro = superficial).
 - **Sonido:** seis categorías de magnitud con tres variaciones cada una. El volumen sube
   6,5 dB por grado y un limitador suave evita la saturación.
+- **Tectónica:** se dibujan las placas de Cocos, Nazca y Caribe, sus límites (Zona de
+  Fractura de Panamá, Fosa Mesoamericana y Cinturón Deformado del Sur de Panamá) y las
+  fallas de Pedro Miguel y Azuero–Soná. Todas son trazas simplificadas e ilustrativas.
 - **Mapa base:** `global-land-mask` (GLOBE, ~1 km), sin conexión y sin claves.
-- **Limitaciones:** el catálogo USGS solo está completo desde M≈4 en Panamá. La traza de
-  la falla de Pedro Miguel es aproximada.
+- **Limitaciones:** el catálogo USGS solo está completo desde M≈4 en Panamá. Las trazas de
+  fallas y límites de placa son aproximadas.
 
 ## Estructura
 
