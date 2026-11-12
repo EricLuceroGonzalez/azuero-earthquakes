@@ -1,36 +1,35 @@
-#!/usr/bin/env python3
-"""
-Sismos de Panamá: mapa animado + sonificación por magnitud.
+"""Sismos de Panamá: mapa animado + sonificación por magnitud.
 
 Pasos (cada uno guarda su resultado y se puede correr por separado):
 
-    python sismos.py fetch     # descarga el catálogo del USGS -> data/sismos.csv
-    python sismos.py sounds    # genera el banco de sonidos con ElevenLabs -> sounds/
-    python sismos.py render    # dibuja el mapa, mezcla el audio y exporta out/sismos_panama.mp4
-    python sismos.py all       # los tres en orden
+    uv run python -m sismos_azuero fetch    # catálogo del USGS -> data/sismos.csv
+    uv run python -m sismos_azuero sounds   # banco de sonidos (ElevenLabs) -> sounds/
+    uv run python -m sismos_azuero render   # mapa + audio -> out/sismos_panama.mp4
+    uv run python -m sismos_azuero all      # los tres en orden
 
-La clave de ElevenLabs se lee de la variable ELEVENLABS_API_KEY (solo hace falta en `sounds`).
+La clave de ElevenLabs se lee de ELEVENLABS_API_KEY (solo hace falta en `sounds`).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
+import logging
 import os
 import random
 import subprocess
 import sys
 import wave
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import requests
 
-HERE = Path(__file__).resolve().parent
+# Raíz del proyecto (src/sismos_azuero/main.py -> ../../).
+HERE = Path(__file__).resolve().parents[2]
 DATA_DIR = HERE / "data"
 SOUNDS_DIR = HERE / "sounds"
 OUT_DIR = HERE / "out"
@@ -42,8 +41,11 @@ USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 ELEVEN_URL = "https://api.elevenlabs.io/v1/sound-generation"
 
 SAMPLE_RATE = 44100
+
+logger = logging.getLogger(__name__)
+
 # --------------------------------------------------------------------------------------
-# Banco de sonidos: una categoría por rango de magnitud, varias variaciones por categoría.
+# Banco de sonidos: una categoría por rango de magnitud, con variaciones.
 # Ajusta los textos a gusto: son los prompts que recibe el modelo de efectos de sonido.
 # --------------------------------------------------------------------------------------
 
@@ -61,37 +63,43 @@ BUCKETS: list[Bucket] = [
         "m2",
         0.0,
         0.6,
-        "a single very soft dry tick, like a tiny pebble tapping stone, extremely short, close and clean, no reverb",
+        "a single very soft dry tick, like a tiny pebble tapping stone, "
+        "extremely short, close and clean, no reverb",
     ),
     Bucket(
         "m3",
         3.0,
         1.0,
-        "a short muffled low thud, like a distant heavy door closing far away, subtle, clean, no music",
+        "a short muffled low thud, like a distant heavy door closing far away, "
+        "subtle, clean, no music",
     ),
     Bucket(
         "m4",
         4.0,
         1.6,
-        "a deep short underground rumble with a soft low impact, earth tremor, low frequencies, no music",
+        "a deep short underground rumble with a soft low impact, earth tremor, "
+        "low frequencies, no music",
     ),
     Bucket(
         "m5",
         5.0,
         2.6,
-        "a heavy deep seismic rumble, ground shaking, rolling low bass with gravel and rattling, no music",
+        "a heavy deep seismic rumble, ground shaking, "
+        "rolling low bass with gravel and rattling, no music",
     ),
     Bucket(
         "m6",
         6.0,
         4.0,
-        "a massive deep earthquake rumble, huge low boom from underground followed by a long rolling tail, cinematic, no music",
+        "a massive deep earthquake rumble, huge low boom from underground "
+        "followed by a long rolling tail, cinematic, no music",
     ),
     Bucket(
         "m7",
         7.0,
         6.0,
-        "an enormous catastrophic earthquake, overwhelming sub-bass roar from deep in the earth, cracking rock, long ominous tail, cinematic, no music",
+        "an enormous catastrophic earthquake, overwhelming sub-bass roar from "
+        "deep in the earth, cracking rock, long ominous tail, cinematic, no music",
     ),
 ]
 VARIATIONS = 3
@@ -108,9 +116,11 @@ def bucket_for(mag: float) -> Bucket:
 # --------------------------------------------------------------------------------------
 # 1) Datos
 # --------------------------------------------------------------------------------------
+
+
 def cmd_fetch(args) -> None:
     DATA_DIR.mkdir(exist_ok=True)
-    end = args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    end = args.end or datetime.now(UTC).strftime("%Y-%m-%d")
     params = dict(
         format="csv",
         starttime=args.start,
@@ -120,7 +130,7 @@ def cmd_fetch(args) -> None:
         limit=20000,
         **BBOX,
     )
-    print(f"Descargando USGS {args.start} -> {end}, M>={args.min_mag} ...")
+    logger.info(f"Descargando USGS {args.start} -> {end}, M>={args.min_mag} ...")
     r = requests.get(USGS_URL, params=params, timeout=120)
     r.raise_for_status()
     raw = DATA_DIR / "usgs_raw.csv"
@@ -131,13 +141,15 @@ def cmd_fetch(args) -> None:
     df = df.dropna(subset=["mag"]).sort_values("time").reset_index(drop=True)
     out = DATA_DIR / "sismos.csv"
     df.to_csv(out, index=False)
-    print(f"{len(df)} sismos guardados en {out.relative_to(HERE)}")
-    print(df["mag"].describe().round(2).to_string())
+    logger.info(f"{len(df)} sismos guardados en {out.relative_to(HERE)}")
+    logger.info(df["mag"].describe().round(2).to_string())
 
 
 # --------------------------------------------------------------------------------------
 # 2) Sonidos (ElevenLabs Sound Effects)
 # --------------------------------------------------------------------------------------
+
+
 def sound_path(bucket: Bucket, i: int) -> Path:
     return SOUNDS_DIR / f"{bucket.name}_{i + 1}.mp3"
 
@@ -155,9 +167,9 @@ def cmd_sounds(args) -> None:
                 prompt=b.prompt, duration=b.duration, min_mag=b.min_mag
             )
             if path.exists() and not args.force:
-                print(f"  ya existe {path.name}, lo salto")
+                logger.info(f"  ya existe {path.name}, lo salto")
                 continue
-            print(f"  generando {path.name} ({b.duration}s) ...")
+            logger.info(f"  generando {path.name} ({b.duration}s) ...")
             r = requests.post(
                 ELEVEN_URL,
                 params={"output_format": "mp3_44100_128"},
@@ -175,11 +187,11 @@ def cmd_sounds(args) -> None:
     (SOUNDS_DIR / "manifest.json").write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
-    print(f"Banco de sonidos listo en {SOUNDS_DIR.relative_to(HERE)}/")
+    logger.info(f"Banco de sonidos listo en {SOUNDS_DIR.relative_to(HERE)}/")
 
 
 def load_audio(path: Path) -> np.ndarray:
-    """Decodifica cualquier archivo de audio a mono float32 a SAMPLE_RATE usando ffmpeg."""
+    """Decodifica un archivo de audio a mono float32 a SAMPLE_RATE con ffmpeg."""
     proc = subprocess.run(
         [
             "ffmpeg",
@@ -213,6 +225,9 @@ DEPTH_MAX_KM = 150
 INK = "#f2f1ee"
 INK_MUTED = "#a3a29d"
 PANEL_BG = "#161616"
+OCEAN = "#101112"
+LAND = "#232321"
+COAST = "#3d3d39"
 
 # Lugares de referencia (coordenadas aproximadas).
 PLACES = [
@@ -227,7 +242,7 @@ PEDRO_MIGUEL = [(9.130, -79.705), (9.060, -79.660), (9.010, -79.620)]
 
 
 def mag_to_area(mag: np.ndarray, scale: float = 1.0) -> np.ndarray:
-    # La energía crece ~10^(1.5 M); usamos un exponente más suave para que se lean todos.
+    # La energía crece ~10^(1.5 M); un exponente más suave deja ver a todos.
     return scale * 6.0 * (10 ** (0.45 * (mag - 2.5)))
 
 
@@ -250,11 +265,11 @@ def build_audio(
         ]
         if not bank[b.name]:
             sys.exit(
-                f"Faltan sonidos de la categoría {b.name}. Corre primero: python sismos.py sounds"
+                f"Faltan sonidos de la categoría {b.name}. Corre primero: make sounds"
             )
 
     mix = np.zeros(int((total_s + 8) * SAMPLE_RATE), dtype=np.float32)
-    # Limitamos la polifonía: dentro de cada ventana corta suena solo el sismo más fuerte.
+    # Polifonía limitada: en cada ventana corta suena solo el sismo más fuerte.
     window = args.sound_window
     last_slot, last_mag = None, -1.0
     order = np.argsort(event_t, kind="stable")
@@ -302,12 +317,12 @@ def write_wav(path: Path, audio: np.ndarray) -> None:
 
 
 def cmd_render(args) -> None:
-    import contextily as cx
     import matplotlib
+    from global_land_mask import globe
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
     from pyproj import Transformer
 
     df = pd.read_csv(DATA_DIR / "sismos.csv", parse_dates=["time"])
@@ -321,7 +336,8 @@ def cmd_render(args) -> None:
     total = intro + body + outro
     n_frames = int(round(total * fps))
 
-    # Tiempo real -> tiempo de video (lineal: refleja también que la red sísmica mejoró con los años).
+    # Tiempo real -> tiempo de video, lineal (refleja también que la red sísmica
+    # mejoró con los años).
     elapsed = (df["time"] - df["time"].min()).dt.total_seconds().to_numpy()
     frac = elapsed / max(float(elapsed.max()), 1.0)
     event_t = intro + frac * body
@@ -360,7 +376,7 @@ def cmd_render(args) -> None:
     # Referencias geográficas.
     px, py = tr.transform([p[2] for p in PLACES], [p[1] for p in PLACES])
     ax.scatter(px, py, s=10, c=INK_MUTED, zorder=3, linewidths=0)
-    for (name, _, _), xx, yy in zip(PLACES, px, py):
+    for (name, _, _), xx, yy in zip(PLACES, px, py, strict=True):
         ax.annotate(
             name,
             (xx, yy),
@@ -373,14 +389,15 @@ def cmd_render(args) -> None:
     fx, fy = tr.transform([p[1] for p in PEDRO_MIGUEL], [p[0] for p in PEDRO_MIGUEL])
     ax.plot(fx, fy, color=INK, lw=2, ls=(0, (4, 2)), zorder=3, solid_capstyle="round")
     ax.annotate(
-        "Falla de\nPedro Miguel",
-        (fx[0], fy[0]),
-        xytext=(-14, 14),
+        "Falla de Pedro Miguel",
+        (fx[-1], fy[-1]),
+        xytext=(-40, -38),
         textcoords="offset points",
         color=INK,
         fontsize=12,
         ha="right",
         zorder=3,
+        arrowprops=dict(arrowstyle="-", color=INK, lw=0.8, shrinkA=2, shrinkB=2),
     )
 
     cmap = LinearSegmentedColormap.from_list("depth", DEPTH_RAMP)
@@ -388,41 +405,44 @@ def cmd_render(args) -> None:
     base_rgba = cmap(norm(np.clip(df["depth"].to_numpy(), 0, DEPTH_MAX_KM)))
     areas = mag_to_area(df["mag"].to_numpy())
 
-    # Dos capas: puntos ya ocurridos (persisten, atenuados) y el "destello" del sismo reciente.
+    # Dos capas: puntos ya ocurridos (persisten, atenuados) y el "destello" reciente.
     old = ax.scatter([], [], s=[], zorder=4, linewidths=0)
     flash = ax.scatter([], [], s=[], zorder=5, facecolors="none", linewidths=2)
 
     # ---- panel derecho ----
-    left = ax.get_position().x1 + 0.035
-    fig.text(left, 0.90, "Sismos en Panamá", color=INK, fontsize=34, weight="bold")
+    left = ax.get_position().x1 + 0.025
+    right = 0.975
+    pw = right - left
+    fig.text(left, 0.90, "Sismos en Panamá", color=INK, fontsize=30, weight="bold")
     fig.text(
         left,
         0.855,
         f"Catálogo USGS · M ≥ {args.min_mag} · "
         f"{df['time'].min().year}–{df['time'].max().year}",
         color=INK_MUTED,
-        fontsize=15,
+        fontsize=14,
     )
     date_txt = fig.text(
-        left, 0.74, "", color=INK, fontsize=44, weight="bold", family="monospace"
+        left, 0.74, "", color=INK, fontsize=40, weight="bold", family="monospace"
     )
     count_txt = fig.text(left, 0.69, "", color=INK_MUTED, fontsize=17)
     max_txt = fig.text(left, 0.64, "", color=INK_MUTED, fontsize=15, wrap=True)
 
     # Leyenda de tamaño (magnitud).
     fig.text(left, 0.555, "Magnitud", color=INK, fontsize=15, weight="bold")
-    lax = fig.add_axes([left, 0.44, 0.18, 0.1], facecolor=PANEL_BG)
+    lax = fig.add_axes([left, 0.43, pw, 0.11], facecolor=PANEL_BG)
     lax.set_axis_off()
-    lax.set_xlim(0, 4.6)
+    lax.set_xlim(-0.3, 5.0)
     lax.set_ylim(-1, 1)
     for k, m in enumerate([3, 4, 5, 6, 7]):
         lax.scatter(
             [k * 1.1 + 0.2],
             [0.15],
-            s=mag_to_area(np.array([m]))[0] * 0.5,
+            s=mag_to_area(np.array([m]))[0],
             c="none",
             edgecolors=INK,
             linewidths=1.2,
+            clip_on=False,
         )
         lax.text(
             k * 1.1 + 0.2, -0.85, str(m), color=INK_MUTED, fontsize=12, ha="center"
@@ -430,7 +450,7 @@ def cmd_render(args) -> None:
 
     # Barra de color (profundidad).
     fig.text(left, 0.395, "Profundidad (km)", color=INK, fontsize=15, weight="bold")
-    cax = fig.add_axes([left, 0.365, 0.2, 0.018])
+    cax = fig.add_axes([left, 0.36, pw * 0.92, 0.018])
     cb = fig.colorbar(
         plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal"
     )
@@ -440,7 +460,7 @@ def cmd_render(args) -> None:
     cax.tick_params(colors=INK_MUTED, labelsize=12, length=0)
 
     # Línea de tiempo: magnitud vs fecha, se va revelando.
-    tax = fig.add_axes([left, 0.08, 0.27, 0.22], facecolor=PANEL_BG)
+    tax = fig.add_axes([left + 0.03, 0.1, pw - 0.035, 0.19], facecolor=PANEL_BG)
     tax.scatter(df["time"], df["mag"], s=4, c=INK_MUTED, alpha=0.18, linewidths=0)
     tl = tax.scatter([], [], s=6, linewidths=0, zorder=3)
     cursor = tax.axvline(df["time"].min(), color=INK, lw=1)
@@ -451,20 +471,26 @@ def cmd_render(args) -> None:
     for s in ("left", "bottom"):
         tax.spines[s].set_color("#3a3a37")
     tax.tick_params(colors=INK_MUTED, labelsize=11)
+    loc = matplotlib.dates.AutoDateLocator(minticks=3, maxticks=5)
+    tax.xaxis.set_major_locator(loc)
+    tax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%Y"))
     tax.set_ylabel("Magnitud", color=INK_MUTED, fontsize=12)
     tax.grid(axis="y", color="#2a2a28", lw=0.8)
 
     fig.text(
         left,
-        0.025,
-        "Datos: USGS ComCat · Mapa: © OpenStreetMap, © CARTO · Sonido: ElevenLabs",
+        0.03,
+        "Datos: USGS ComCat · Costas: global-land-mask (GLOBE)\n"
+        "Sonido: ElevenLabs · Traza de la falla aproximada",
         color="#6e6d69",
         fontsize=10,
+        linespacing=1.5,
     )
 
     times = df["time"]
     mags = df["mag"].to_numpy()
     fade_s = args.flash
+
     video_tmp = OUT_DIR / "_video.mp4"
     ff = subprocess.Popen(
         [
@@ -495,7 +521,7 @@ def cmd_render(args) -> None:
         stdin=subprocess.PIPE,
     )
 
-    print(f"Dibujando {n_frames} cuadros ({total:.0f} s a {fps} fps) ...")
+    logger.info(f"Dibujando {n_frames} cuadros ({total:.0f} s a {fps} fps) ...")
     for f in range(n_frames):
         t = f / fps
         visible = event_t <= t
@@ -526,7 +552,7 @@ def cmd_render(args) -> None:
             imax = int(np.argmax(np.where(visible, mags, -1)))
             max_txt.set_text(
                 f"Mayor hasta ahora: M{mags[imax]:.1f} · "
-                f"{times.iloc[imax]:%Y-%m-%d}\n{str(df['place'].iloc[imax])[:48]}"
+                f"{times.iloc[imax]:%Y-%m-%d}\n{str(df['place'].iloc[imax])[:40]}"
             )
             tl.set_offsets(
                 np.column_stack(
@@ -542,21 +568,17 @@ def cmd_render(args) -> None:
         fig.canvas.draw()
         ff.stdin.write(fig.canvas.buffer_rgba().tobytes())
         if f % (fps * 5) == 0:
-            print(f"  {t:5.1f} s · {n} sismos")
-
-        fig.canvas.draw()
-        ff.stdin.write(fig.canvas.buffer_rgba().tobytes())
-        if f % (fps * 5) == 0:
-            print(f"  {t:5.1f} s · {n} sismos")
+            logger.info(f"  {t:5.1f} s · {n} sismos")
 
     ff.stdin.close()
     ff.wait()
     plt.close(fig)
 
-    print("Mezclando audio ...")
+    logger.info("Mezclando audio ...")
     audio = build_audio(df, event_t, total, args)
     wav = OUT_DIR / "_audio.wav"
     write_wav(wav, audio)
+
     out = OUT_DIR / args.output
     subprocess.run(
         [
@@ -580,13 +602,13 @@ def cmd_render(args) -> None:
         check=True,
     )
     video_tmp.unlink()
-    print(f"Listo: {out.relative_to(HERE)}")
+    logger.info(f"Listo: {out.relative_to(HERE)}")
 
 
 # --------------------------------------------------------------------------------------
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -609,9 +631,6 @@ def main() -> None:
         sp.add_argument("--intro", type=float, default=2)
         sp.add_argument("--outro", type=float, default=4)
         sp.add_argument("--fps", type=int, default=30)
-        sp.add_argument(
-            "--zoom", type=int, default=8, help="zoom de los mosaicos del mapa base"
-        )
         sp.add_argument(
             "--flash", type=float, default=0.8, help="duración del destello (s)"
         )
@@ -644,14 +663,10 @@ def main() -> None:
     add_sounds(a)
     add_render(a)
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.cmd in ("fetch", "all"):
         cmd_fetch(args)
     if args.cmd in ("sounds", "all"):
         cmd_sounds(args)
     if args.cmd in ("render", "all"):
         cmd_render(args)
-
-
-if __name__ == "__main__":
-    main()

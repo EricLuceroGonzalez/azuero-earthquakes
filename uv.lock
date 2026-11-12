@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1127,11 +1127,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "global-land-mask", specifier = ">=1.0.0" },
-    { name = "matplotlib", specifier = ">=3.11.2" },
-    { name = "numpy", specifier = ">=2.5.4" },
-    { name = "pandas", specifier = ">=3.1.1" },
-    { name = "pyproj", specifier = ">=3.8.0" },
-    { name = "requests", specifier = ">=2.34.2" },
+    { name = "matplotlib", specifier = ">=3.9" },
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "pandas", specifier = ">=2.2" },
+    { name = "pyproj", specifier = ">=3.7" },
+    { name = "requests", specifier = ">=2.32" },
 ]
 
 [package.metadata.requires-dev]

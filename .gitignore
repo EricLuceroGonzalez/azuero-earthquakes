@@ -14,3 +14,7 @@ logs/*
 docs/diagrams/*.png
 docs/diagrams/*.dot
 .DS_Store
+
+# Salidas regeneradas por el pipeline
+out/
+data/usgs_raw.csv

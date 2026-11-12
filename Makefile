@@ -1,5 +1,11 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup test lint format check diagrams clean
+.PHONY: help setup test lint format check diagrams clean fetch sounds render preview video
+
+# Variables de .env (por ejemplo ELEVENLABS_API_KEY) disponibles para los comandos.
+-include .env
+export
+
+RUN := uv run python -m sismos_azuero
 
 help:  ## Muestra esta ayuda
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +30,21 @@ check: lint test  ## lint + tests (lo que corre en CI)
 diagrams:  ## Diagramas UML con pyreverse (requiere graphviz)
 	mkdir -p docs/diagrams
 	uv run pyreverse -o png -p sismos_azuero -d docs/diagrams src/sismos_azuero
+
+fetch:  ## Descarga el catálogo del USGS -> data/sismos.csv
+	$(RUN) fetch
+
+sounds:  ## Genera el banco de sonidos con ElevenLabs -> sounds/
+	@test -n "$$ELEVENLABS_API_KEY" || (echo "Falta ELEVENLABS_API_KEY (ponla en .env)" && exit 1)
+	$(RUN) sounds
+
+render:  ## Video completo -> out/sismos_panama.mp4
+	$(RUN) render
+
+preview:  ## Prueba rápida con los últimos 500 sismos -> out/preview.mp4
+	$(RUN) render --limit 500 --duration 8 --intro 1 --outro 1 --output preview.mp4
+
+video: fetch sounds render  ## fetch + sounds + render
 
 clean:  ## Borra cachés y artefactos
 	find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache \) -prune -exec rm -rf {} +
