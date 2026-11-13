@@ -243,7 +243,7 @@ DEPTH_RAMP = ["#7a0177", "#c51b8a", "#f768a1", "#fbb4b9", "#feebe2"]
 DEPTH_MAX_KM = 150
 
 INK = "#ffffff"
-INK_MUTED = "#f3f3f3"
+INK_MUTED = "#b5b5b5"
 INK_PLACES = "#161616"
 PANEL_BG = "#161616"
 OCEAN = "#e5f5f9"

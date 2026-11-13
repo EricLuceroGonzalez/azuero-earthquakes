@@ -31,7 +31,7 @@ diagrams:  ## Diagramas UML con pyreverse (requiere graphviz)
 	mkdir -p docs/diagrams
 	uv run pyreverse -o png -p sismos_azuero -d docs/diagrams src/sismos_azuero
 
-START ?= 1970-01-01
+START ?= 1926-01-01
 
 fetch:  ## Catálogo USGS -> data/sismos.csv (desde otra fecha: make fetch START=1926-01-01)
 	$(RUN) fetch --start $(START)
